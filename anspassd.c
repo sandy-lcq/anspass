@@ -340,7 +340,7 @@ int load_db1(const struct db1_meta *db1m)
 
 	/* Check blank password for zero prompt run */
 	gcry_md_hash_buffer(GCRY_MD_MD5, (void *)passwd_hash, (const void*)
-			'\0', 1);
+			"", 0);
 	load_gcrypt(passwd_hash, &db1.passwd, &db1.global, &dec_global);
 
 	/* Request passwd if password isn't blank */
