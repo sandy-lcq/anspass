@@ -32,6 +32,7 @@
 #include <sys/un.h>
 #include <termios.h>
 #include <unistd.h>
+#include <ctype.h>
 
 int is_env_set() {
 	if (getenv(ANSPASS_ENV) != NULL)
@@ -181,4 +182,25 @@ int get_secret(unsigned char *text, uint max, const int echo) {
 	/*resetting our old STDIN_FILENO*/
 	tcsetattr( STDIN_FILENO, TCSANOW, &old);
 	return i;
+}
+
+#define URL_UNSAFE_CHARS " <>\"%{}|\\^`:?#[]@!$&'()*+,;="
+//This function use the same encode way as Git
+void str_percentencode(char *dst, const char *src, int flags)
+{
+	size_t i, len = strlen(src);
+
+	for (i = 0; i < len; i++) {
+		unsigned char ch = src[i];
+		if (ch <= 0x1F || ch >= 0x7F ||
+			(ch == '/' && (flags & ENCODE_SLASH)) ||
+			((flags & ENCODE_HOST_AND_PORT) ?
+			!isalnum(ch) && !strchr("-.:[]", ch) :
+			!!strchr(URL_UNSAFE_CHARS, ch))) {
+				sprintf(dst, "%%%02X", (unsigned char)ch);
+				dst += 3;
+			}
+		else
+			*dst++ = ch;
+	}
 }
