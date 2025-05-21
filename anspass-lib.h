@@ -48,6 +48,9 @@
 #define SHUTDOWN                7
 #define ACK                     104
 
+#define ENCODE_SLASH 1
+#define ENCODE_HOST_AND_PORT 2
+
 struct anspass_packet {
 	int socket;
 	struct timeval *to;
@@ -82,4 +85,5 @@ unsigned char* string_to_hex(char * str);
 
 int get_secret(unsigned char* text, const uint max, const int echo);
 void print_env(const char* missing);
+void str_percentencode(char *dst, const char *src, int flags);
 #endif

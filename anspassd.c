@@ -31,8 +31,6 @@
 #include <sys/un.h>
 #include <sys/stat.h>
 
-
-
 int main(int argv, char *argc[]) {
 	int ret = -EINVAL;
 	int i = 0;
@@ -1213,6 +1211,80 @@ oom:
 	return;
 }
 
+static inline void get_percentencode_username_str(char *user, struct anspass_packet *in) {
+	char *token;
+	char *d = "/";
+
+	char *msg = (char*)calloc(1, strlen(in->msg) + 1);
+	if (!msg)
+		goto oom;
+	memcpy(msg, in->msg, strlen(in->msg) + 1);
+
+	token = strtok(msg, d);
+	sprintf(user, "%s'%s//", USERNAME_STR, token);
+
+	// Try to encode host in username prompt
+	char* encoded_str = (char*)calloc(1, 3*MAX_MSG_LENGTH + 1);
+	token = strtok(NULL, d);
+	if(token) {
+		str_percentencode(encoded_str, token, ENCODE_HOST_AND_PORT);
+		strcat(user, encoded_str);
+		memset(encoded_str, 0, 3*MAX_MSG_LENGTH + 1);
+	}
+	token = strtok(NULL, d);
+	while(token) {
+		strcat(user, "/");
+		str_percentencode(encoded_str, token, ENCODE_HOST_AND_PORT);
+		strcat(user, encoded_str);
+		memset(encoded_str, 0, 3*MAX_MSG_LENGTH + 1);
+		token = strtok(NULL, d);
+	}
+	strcat(user, "': ");
+	free(msg);
+	free(encoded_str);
+oom:
+	return;
+}
+
+static inline void get_percentencode_passwd_str(char *passwd, struct anspass_packet *in) {
+	char *token;
+	char *d = "/";
+
+	char *msg = (char*)calloc(1, strlen(in->msg) + 1);
+	if (!msg)
+		goto oom;
+	memcpy(msg, in->msg, strlen(in->msg) + 1);
+
+	token = strtok(msg, d);
+	sprintf(passwd, "%s'%s//", PASSWORD_STR, token);
+	char* encoded_str = (char*)calloc(1, 3*MAX_MSG_LENGTH + 1);
+	//Try to encode username in password prompt
+	str_percentencode(encoded_str, in->user, ENCODE_SLASH);
+	strcat(passwd, encoded_str);
+	memset(encoded_str, 0, 3*MAX_MSG_LENGTH + 1);
+	strcat(passwd, "@");
+	//Try to encode host in password prompt
+	token = strtok(NULL, d);
+	if(token) {
+		str_percentencode(encoded_str, token, ENCODE_HOST_AND_PORT);
+		strcat(passwd, encoded_str);
+		memset(encoded_str, 0, 3*MAX_MSG_LENGTH + 1);
+	}
+	token = strtok(NULL, d);
+	while(token) {
+		strcat(passwd, "/");
+		str_percentencode(encoded_str, token, ENCODE_HOST_AND_PORT);
+		strcat(passwd, encoded_str);
+		memset(encoded_str, 0, 3*MAX_MSG_LENGTH + 1);
+		token = strtok(NULL, d);
+	}
+	strcat(passwd, "': ");
+	free(msg);
+	free(encoded_str);
+oom:
+	return;
+}
+
 void process_request(struct anspass_packet *in) {
 
 	syslog(LOG_PID | LOG_DEBUG, "Received packet: \"%s\"\n", in->msg);
@@ -1293,6 +1365,8 @@ int del (struct anspass_packet *in){
 	struct db1_entry *e_user = NULL;
 	struct db1_entry *e_passwd = NULL;
 
+	struct db1_entry *e_encoded_user = NULL;
+	struct db1_entry *e_encoded_passwd = NULL;
 
 	char* passwd = (char*)calloc(1, get_passwd_len(in->msg, in->user));
 	if (!passwd)
@@ -1302,11 +1376,22 @@ int del (struct anspass_packet *in){
 	if (!user)
 		goto no_user_mem;
 
+	char* encoded_passwd = (char*)calloc(1, 3 * get_passwd_len(in->msg, in->user));
+	if (!encoded_passwd)
+		goto no_encoded_passwd_mem;
+	char* encoded_user = (char*)calloc(1, 3 * (sizeof(char) * (strlen(in->msg) +
+				strlen(USERNAME_STR) + 5)));
+	if (!encoded_user)
+		goto no_encoded_user_mem;
+
 	/* Username string is easy */
 	sprintf(user, "%s'%s': ", USERNAME_STR, in->msg);
 
+	get_percentencode_username_str(encoded_user, in);
 	/* Passwd has to insert username into the URI */
 	get_passwd_str(passwd, in);
+
+	get_percentencode_passwd_str(encoded_passwd, in);
 
 	ret = get_db1_entry(user, &e_user);
 	if (ret)
@@ -1315,6 +1400,19 @@ int del (struct anspass_packet *in){
 	ret = get_db1_entry(passwd, &e_passwd);
 	if (ret)
 		goto passwd_dne;
+
+	if (strcmp(user, encoded_user) != 0) {
+		ret = get_db1_entry(encoded_user, &e_encoded_user);
+		if (ret) {
+			goto encoded_user_dne;
+		}
+	}
+	if (strcmp(passwd, encoded_passwd) != 0) {
+		ret = get_db1_entry(encoded_passwd, &e_encoded_passwd);
+		if (ret) {
+			goto encoded_passwd_dne;
+		}
+	}
 
 	ret = del_db2_cred(e_user);
 	if (ret)
@@ -1334,8 +1432,42 @@ int del (struct anspass_packet *in){
 		goto del_passwd_fail;
 	e_passwd = NULL;
 
+	if (strcmp(user, encoded_user) != 0) {
+		ret = del_db2_cred(e_encoded_user);
+		if (ret)
+			goto del_db2_encoded_user_fail;
+		ret = del_db1_entry(e_encoded_user);
+		if (ret)
+			goto del_encoded_user_fail;
+	}
+	e_encoded_user = NULL;
+
+	if (strcmp(passwd, encoded_passwd) != 0) {
+		ret = del_db2_cred(e_encoded_passwd);
+		if (ret)
+			goto del_db2_encoded_passwd_fail;
+		ret = del_db1_entry(e_encoded_passwd);
+		if (ret)
+			goto del_encoded_passwd_fail;
+	}
+	encoded_passwd = NULL;
+
 	ret = 0;
 
+del_encoded_passwd_fail:
+del_db2_encoded_passwd_fail:
+	if (e_encoded_passwd) {
+		del_db2_cred(e_encoded_passwd);
+		del_db1_entry(e_encoded_passwd);
+		e_encoded_passwd = NULL;
+	}
+del_encoded_user_fail:
+del_db2_encoded_user_fail:
+	if (e_encoded_user) {
+		del_db2_cred(e_encoded_user);
+		del_db1_entry(e_encoded_user);
+		e_encoded_user = NULL;
+	}
 	/* Un-roll. */
 del_passwd_fail:
 	/* Fall-through expected */
@@ -1345,22 +1477,38 @@ del_db2_passwd_fail:
 		del_db1_entry(e_passwd);
 		e_passwd = NULL;
 	}
-
 del_user_fail:
+del_db2_user_fail:
 	if (e_user) {
 		del_db1_entry(e_user);
+		del_db2_cred(e_user);
 		e_user = NULL;
 	}
-
-del_db2_user_fail:
+encoded_passwd_dne:
+encoded_user_dne:
 	/* Fall-through expected */
 passwd_dne:
 	/* Fall-through expected */
 user_dne:
-
-	free(user);
+	if (encoded_user) {
+		free(encoded_user);
+		user = NULL;
+	}
+no_encoded_user_mem:
+	if (encoded_passwd) {
+		free(encoded_passwd);
+		encoded_passwd = NULL;
+	}
+no_encoded_passwd_mem:
+	if (user) {
+		free(user);
+		user = NULL;
+	}
 no_user_mem:
-	free(passwd);
+	if (passwd) {
+		free(passwd);
+		passwd = NULL;
+	}
 no_passwd_mem:
 	return ret;
 }
@@ -1384,39 +1532,68 @@ no_out_mem:
 }
 
 
-	/* Must add two entries (username/password) */
+/* At least add two entries (username/password), if encoded username/password
+ * is different with original one, another entry is added */
 int add(struct anspass_packet *in) {
 	int ret = -ENOMEM;
 	struct db1_entry *e_user = NULL;
 	struct db1_entry *e_passwd = NULL;
+
+	struct db1_entry *e_encoded_user = NULL;
+	struct db1_entry *e_encoded_passwd = NULL;
+
 	char* passwd = (char*)calloc(1, get_passwd_len(in->msg, in->user));
 	if (!passwd)
 		goto no_passwd_mem;
-
-
 	char* user = (char*)calloc(1, sizeof(char) * (strlen(in->msg) +
 				strlen(USERNAME_STR) + 5));
 	if (!user)
 		goto no_user_mem;
+
+	char* encoded_passwd = (char*)calloc(1, 3 * get_passwd_len(in->msg, in->user));
+	if (!encoded_passwd)
+		goto no_encoded_passwd_mem;
+	char* encoded_user = (char*)calloc(1, 3 * (sizeof(char) * (strlen(in->msg) +
+				strlen(USERNAME_STR) + 5)));
+	if (!encoded_user)
+		goto no_encoded_user_mem;
+
 	/* Username string is easy */
 	sprintf(user, "%s'%s': ", USERNAME_STR, in->msg);
+
+	get_percentencode_username_str(encoded_user, in);
 
 	/* Passwd has to insert username into the URI */
 	get_passwd_str(passwd, in);
 
+	get_percentencode_passwd_str(encoded_passwd, in);
 
 	ret = get_db1_entry(user, &e_user);
-	if (!ret)
-	{
+	if (!ret) {
 		ret = -EEXIST;
 		goto user_exists;
 	}
 
 	ret = get_db1_entry(passwd, &e_passwd);
-	if (!ret)
-	{
+	if (!ret) {
 		ret = -EEXIST;
 		goto passwd_exists;
+	}
+
+	if (strcmp(user, encoded_user) != 0) {
+		ret = get_db1_entry(encoded_user, &e_encoded_user);
+		if (!ret) {
+			ret = -EEXIST;
+			goto encoded_user_exists;
+		}
+	}
+
+	if (strcmp(passwd, encoded_passwd) != 0) {
+		ret = get_db1_entry(encoded_passwd, &e_encoded_passwd);
+		if (!ret) {
+			ret = -EEXIST;
+			goto encoded_passwd_exists;
+		}
 	}
 
 	ret = create_db1_entry(user, &e_user);
@@ -1435,11 +1612,35 @@ int add(struct anspass_packet *in) {
 	if (ret)
 		goto create_db2_passwd_fail;
 
+	if (strcmp(user, encoded_user) != 0) {
+		ret = create_db1_entry(encoded_user, &e_encoded_user);
+		if (ret)
+			goto create_encoded_user_fail;
 
+		ret = create_db2_entry(e_encoded_user, in->user);
+		if (ret)
+			goto create_db2_encoded_user_fail;
+	}
 
+	if (strcmp(passwd, encoded_passwd) != 0) {
+		ret = create_db1_entry(encoded_passwd, &e_encoded_passwd);
+		if (ret)
+			goto create_encoded_passwd_fail;
 
-	/* Un-roll & answer. */
-
+		ret = create_db2_entry(e_encoded_passwd, in->passwd);
+		if (ret)
+			goto create_db2_encoded_passwd_fail;
+	}
+create_db2_encoded_passwd_fail:
+	if (ret)
+		del_db1_entry(e_encoded_passwd);
+create_encoded_passwd_fail:
+	if (ret)
+		del_db2_cred(e_encoded_user);
+create_db2_encoded_user_fail:
+	if (ret)
+		del_db1_entry(e_encoded_user);
+create_encoded_user_fail:
 	if (ret)
 		del_db2_cred(e_passwd);
 create_db2_passwd_fail:
@@ -1452,16 +1653,35 @@ create_db2_user_fail:
 	if (ret)
 		del_db1_entry(e_user);
 create_user_fail:
+encoded_passwd_exists:
+encoded_user_exists:
 	/* Fall-through expected */
 passwd_exists:
 	/* Fall-through expected */
 user_exists:
-	free(user);
+	if (encoded_user) {
+		free(encoded_user);
+		encoded_user = NULL;
+	}
+no_encoded_user_mem:
+	if (encoded_passwd) {
+		free(encoded_passwd);
+		encoded_passwd = NULL;
+	}
+no_encoded_passwd_mem:
+	if (user) {
+		free(user);
+		user = NULL;
+	}
 no_user_mem:
-	free(passwd);
+	if (passwd) {
+		free(passwd);
+		passwd = NULL;
+	}
 no_passwd_mem:
 	return ret;
 }
+
 void process_add(struct anspass_packet *in) {
 	int ret = 0;
 
